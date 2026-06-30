@@ -29,18 +29,22 @@ As an event-driven operating system designed to run modern clinical imaging infr
 
 ## 2. Platform Architecture
 
-GULA separates visualization, storage, routing, and machine learning into polyglot microservices:
+GULA separates clinical visualization, DICOM ingestion, database archiving, and AI inference pipelines into polyglot microservices:
 
 ```mermaid
 graph TD
-    User([Browser / Dashboard]) <--> Gateway[API Gateway - Port 8000]
-    Gateway <--> EventBus[(Event Bus Broker)]
+    User([Browser / Web PACS Viewer]) <--> Gateway[API Gateway - Port 8000]
+    Gateway <--> EventBus[(WebSocket/RabbitMQ Event Bus)]
+    
+    %% DICOM Scanners / Modalities
+    Scanner([Clinical Scanner / Modality]) -->|C-STORE TCP Port 11112| GulaDimse[gula-dimse <br> Port 11112]
+    GulaDimse -->|STOW-RS HTTP POST| GulaStudy[gula-study <br> Port 3002]
     
     %% Microservices
-    Gateway --> GulaAuth[gula-auth <br> Node.js / Port 3001]
-    Gateway --> GulaStudy[gula-study <br> Go / Port 3002]
-    Gateway --> GulaPatient[gula-patient <br> Python / Port 3003]
-    Gateway --> GulaAI[gula-ai <br> Python / Port 3004]
+    Gateway --> GulaAuth[gula-auth <br> Port 3001]
+    Gateway --> GulaStudy
+    Gateway --> GulaPatient[gula-patient <br> Port 3003]
+    Gateway --> GulaAI[gula-ai <br> Port 3004]
     
     %% Databases
     GulaAuth <--> AuthDB[(Auth DB - SQLite/Postgres)]
@@ -48,44 +52,47 @@ graph TD
     GulaPatient <--> PatientDB[(Patient DB - SQLite/Postgres)]
     
     %% Storage
-    GulaStudy <--> LocalStorage[(Local / S3 Storage)]
+    GulaStudy <--> LocalStorage[(Local Folder / MinIO S3)]
     
     %% Event loop triggers
     GulaStudy -.->|Publish StudyStored| EventBus
     EventBus -.->|Route event| GulaAI
     GulaAI -.->|Publish AICompleted| EventBus
     EventBus -.->|Route event| GulaPatient
+    EventBus -.->|Broadcast events| User
 ```
 
 ### Polyglot Microservices Matrix
 
-1. **`gula-gateway` (Python/FastAPI)**: Serves as the central reverse proxy, rate-limiter, and hosts the **WebSocket Event Bus Broker** broadcasting system events in real-time.
-2. **`gula-auth` (Node.js/Express)**: Manages users, credentials, role-based access controls (RBAC), and issues secure JWT tokens. Uses SQLite (`auth.db`).
-3. **`gula-study` (Go)**: A high-performance archive implementing **DICOMweb** standards. Coordinates uploads, file reads, and streams imaging frames. Uses SQLite (`study.db`) and saves raw scan binaries to `./storage/`.
-4. **`gula-patient` (Python/FastAPI)**: Subscribes to the Event Bus and automatically compiles the chronological **Digital Patient Timeline** (EHR sync). Uses SQLite (`patient.db`).
-5. **`gula-ai` (Python/FastAPI)**: A clinical inference operator. Subscribes to studies, loads diagnostic plugins, runs mock models, and returns structured findings.
+1. **`gula-gateway` (FastAPI / Port 8000)**: Serves as the central reverse proxy, API gatekeeper, and hosts the bi-directional **WebSocket Event Bus Broker** broadcasting system events to clients in real-time.
+2. **`gula-auth` (Node.js / Port 3001)**: Manages users, credentials, role-based access controls (RBAC), and issues secure JWT tokens. Uses SQLite (`auth.db`).
+3. **`gula-study` (FastAPI / Port 3002)**: A high-performance archive implementing **DICOMweb** standards. Coordinates uploads, file reads, and streams imaging frames with support for dynamic 16-bit contrast stretching. Uses SQLite (`study.db`) and saves raw scan binaries to `./storage/`.
+4. **`gula-patient` (FastAPI / Port 3003)**: Subscribes to the Event Bus and automatically compiles the chronological **Digital Patient Timeline** (EHR sync). Uses SQLite (`patient.db`).
+5. **`gula-ai` (FastAPI / Port 3004)**: A clinical inference operator. Subscribes to studies, loads diagnostic plugins, runs pixel-level numpy analysis matrices, and returns structured findings.
+6. **`gula-dimse` (Python / Port 11112)**: Standard **C-STORE SCP Network Listener** (AE Title: `GULA_PACS`). Receives standard raw TCP transmissions from scanners and uploads them to the core study archive.
 
 ---
 
-## 3. The Digital Patient Timeline & Clinical Standards
+## 3. Web PACS Workspace & Clinical Workflows
 
-GULA moves beyond basic file archiving by constructing a patient-centric, chronological clinical story:
+GULA moves beyond basic file archiving by constructing an interactive diagnostic and reporting workstation directly in the web browser.
 
-```
-[Patient Registered] ──► [Study Received] ──► [Study Stored] ──► [AI Requested] ──► [AI Completed] ──► [Report Signed]
-```
+### A. Diagnostic Web Viewer (Phase 4)
+- **16-bit Server-side Windowing**: Dragging the mouse over the canvas viewport adjusts brightness/contrast. Dragging vertically modifies Window Center (WC), dragging horizontally modifies Window Width (WW), sending debounced query parameters to the WADO-RS endpoint to dynamically window-level 16-bit raw pixel arrays in python.
+- **Pan & Zoom**: Scroll wheel zooms in/out centered at mouse pointer; click-and-drag pans the image.
+- **Calibrated Ruler Measurement**: Draw line annotations directly on the canvas. Automatically calculates real physical distance in **millimeters (mm)** calibrated from DICOM pixel spacing metadata.
 
-### FHIR-Aligned Event Specifications
+### B. Radiology Reporting Workspace (Phase 5)
+- **Structured Report Templates**: Select pre-authored clinical templates (CT Brain or Chest X-Ray) that automatically inject patient metadata, study accession numbers, and active **AI diagnostics findings** into the editor.
+- **Digital Signatures**: Sign off reports electronically. Finalizing submits a `ReportSigned` event to the Event Bus, locking the report as `FINAL` and logging it directly into the patient EMR timeline.
+- **Clinical PDF Export**: Print or export a beautifully formatted radiology report containing demographics, AI insights, finalized conclusion text, and radiologist verification signature stamps.
+
+### C. FHIR-Aligned Event Specifications
 All event payloads are formatted under HL7 FHIR R4 resources:
 - **`PatientCreated`**: Maps to the FHIR **Patient** schema (demographics, tenant ID).
 - **`StudyReceived` / `StudyStored`**: Maps to the FHIR **ImagingStudy** schema (StudyInstanceUID, accession, series configurations, storage paths).
 - **`AICompleted`**: Maps to FHIR **Observation** items containing abnormality tags, findings, and probability scores.
-- **`ReportCreated` / `ReportSigned`**: Maps to the FHIR **DiagnosticReport** container (conclusions, signatures).
-
-### DICOMweb REST API Endpoints
-- **QIDO-RS (Query)**: `GET /dicomweb/studies` (Search for studies)
-- **WADO-RS (Retrieve)**: `GET /dicomweb/studies/{studyUID}/series/{seriesUID}/instances/{instanceUID}/frames/{frame}` (Retrieve raw pixel frames)
-- **STOW-RS (Store)**: `POST /dicomweb/studies` (Upload multipart DICOM file payload)
+- **`ReportSigned`**: Maps to the FHIR **DiagnosticReport** container (conclusions, signatures).
 
 ---
 
@@ -106,16 +113,35 @@ python start.py
 ```
 This script will:
 - Reset old SQLite databases and storage folders.
-- Setup a Python virtual environment (`venv`) and install all required libraries (`fastapi`, `uvicorn`, `websockets`, `httpx`, `pyjwt`, `bcrypt`, `python-multipart`, `requests`).
-- Launch all 5 services as concurrent subprocesses.
+- Setup a Python virtual environment (`venv`) and install all required libraries (`pynetdicom`, `pydicom`, `numpy`, `pillow`, `fastapi`, `uvicorn`, `websockets`, `httpx`, `pyjwt`, `bcrypt`, `python-multipart`, `requests`, `pika`, `psycopg2-binary`, `minio`).
+- Launch all 6 microservices as concurrent subprocesses.
 - Output logs to `./logs/`.
 
 Once initialized, navigate to the Developer Portal at:
 👉 **[http://localhost:8000/dashboard](http://localhost:8000/dashboard)**
 
-### Running Integration Tests
-To execute the automated pipeline checks and verify the WebSocket Event Bus trace:
-```bash
-.\venv\Scripts\python verify_sandbox.py
-```
-This runs a simulated workflow: creating a radiologist, creating a patient, uploading a dummy CT slice, and asserting that the event bus correctly triggers the AI and compiles the patient timeline.
+---
+
+## 5. Testing the Clinical PACS Pipeline
+
+GULA includes interactive scratch scripts to verify the entire clinical loop from a simulated scanner to the EMR patient timeline.
+
+1. **Simulate a DICOM Modality Upload (C-STORE SCP)**:
+   In a separate terminal, run the simulated CT modality script. This generates a valid binary DICOM file, initiates a network association, and transmits it over port `11112` to `GULA_PACS`:
+   ```bash
+   .\venv\Scripts\python .gemini/antigravity/brain/54d7223a-b58f-4f2b-8678-67eed0b7cf94/scratch/send_test_dicom.py
+   ```
+   *Expected Output*: C-STORE completed successfully with status `0x0000` (Success).
+
+2. **Simulate Patient EMR Registration**:
+   Sync patient demographics for the uploaded scan by sending the EMR enrollment package to the event bus:
+   ```bash
+   .\venv\Scripts\python .gemini/antigravity/brain/54d7223a-b58f-4f2b-8678-67eed0b7cf94/scratch/register_dimse_patient.py
+   ```
+
+3. **Verify Interactive Viewer & Reporting Ingestion**:
+   Run the verification test suite to check that server-side 16-bit WADO-RS windowing renders properly, and that final diagnostic reports compile correctly inside the patient's EMR timeline:
+   ```bash
+   .\venv\Scripts\python .gemini/antigravity/brain/54d7223a-b58f-4f2b-8678-67eed0b7cf94/scratch/verify_viewer_reporting.py
+   ```
+   *Expected Output*: Auto-contrast and Custom W/L frames return valid PNG images, and `ReportSigned` is saved successfully in the timeline history.
