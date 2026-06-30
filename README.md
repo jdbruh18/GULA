@@ -145,3 +145,24 @@ GULA includes interactive scratch scripts to verify the entire clinical loop fro
    .\venv\Scripts\python .gemini/antigravity/brain/54d7223a-b58f-4f2b-8678-67eed0b7cf94/scratch/verify_viewer_reporting.py
    ```
    *Expected Output*: Auto-contrast and Custom W/L frames return valid PNG images, and `ReportSigned` is saved successfully in the timeline history.
+
+---
+
+## 6. GULA Phased Development Roadmap
+
+The platform's roadmap is structured to evolve from a lightweight clinical sandbox to a scalable enterprise imaging operating system:
+
+| Phase | Milestone | Focus Area & Key Deliverables | Status |
+| :--- | :--- | :--- | :--- |
+| **Phase 0** | **Foundation** | Established architecture standards, API contracts, event schema specs, and database layout configurations. | **Completed** |
+| **Phase 1** | **Core Infrastructure** | Monorepo setup, API Gateway, JWT authentication, containerized PostgreSQL, RabbitMQ, and MinIO stacks. | **Completed** |
+| **Phase 2** | **Event Bus** | Defined standard event envelope formats (`PatientCreated`, `StudyReceived`, `AICompleted`, etc.) using topic routing. | **Completed** |
+| **Phase 3** | **Archive** | Implemented C-STORE SCP network listener (port `11112`) and DICOMweb REST API endpoints (STOW-RS, QIDO-RS, WADO-RS). | **Completed** |
+| **Phase 4** | **Diagnostic Viewer** | Render high-performance viewport canvases with server-side 16-bit windowing, pan, zoom, and mm spacing measurements. | **Completed** |
+| **Phase 5** | **Reporting** | Author structured templates, digital signature sign-offs, and PDF exports for clinicians. | **Completed** |
+| **Phase 6** | **AI Engine** | Package deep-learning voxel analytical pipelines (hemorrhage and pneumonia consolidation checks) using dynamic plugin loaders. | **Completed** |
+| **Phase 7** | **FHIR Integration** | Synchronize clinical studies and report findings natively with external EHR/EMR platforms using standard FHIR APIs. | **Planned** |
+| **Phase 8** | **Advanced Viewport** | Implement multi-planar reconstruction (MPR), 3D volume rendering, and diagnostic segmentation drawing controls. | **Planned** |
+| **Phase 9** | **HL7 v2 Broker** | Build a parser for legacy HL7 messages (ADT patient demographics and ORM imaging orders) to sync legacy PACS. | **Planned** |
+| **Phase 10** | **Compliance & Security**| Integrate HIPAA-compliant audit logs, end-to-end DICOM TLS data encryption, and encrypted backups. | **Planned** |
+| **Phase 11** | **Marketplace Hub** | Deploy cloud-native microservice clusters, third-party model plugins, and developer integration SDKs. | **Planned** |
