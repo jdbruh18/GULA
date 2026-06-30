@@ -30,6 +30,8 @@ jobs:
             context: ./backend/gula-patient
           - name: gula-ai
             context: ./backend/gula-ai
+          - name: gula-dimse
+            context: ./backend/gula-dimse
 
     steps:
       - name: Checkout repository
