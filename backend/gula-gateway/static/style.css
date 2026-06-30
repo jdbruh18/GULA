@@ -1,14 +1,14 @@
 :root {
-    --bg-color: #080a10;
-    --card-bg: rgba(16, 20, 35, 0.65);
-    --border-color: rgba(255, 255, 255, 0.08);
-    --border-glow: rgba(0, 242, 254, 0.15);
-    --text-primary: #f3f4f6;
+    --bg-color: #0c0f17;
+    --card-bg: rgba(15, 20, 32, 0.7);
+    --border-color: rgba(255, 255, 255, 0.06);
+    --border-glow: rgba(225, 29, 72, 0.12);
+    --text-primary: #f9fafb;
     --text-secondary: #9ca3af;
     
-    --primary: #00f2fe;
-    --primary-glow: rgba(0, 242, 254, 0.4);
-    --secondary: #4facfe;
+    --primary: #e11d48; /* Welcoming Red Cross / Crimson */
+    --primary-glow: rgba(225, 29, 72, 0.35);
+    --secondary: #14b8a6; /* Clean Medical Teal */
     --success: #10b981;
     --danger: #ef4444;
     --warning: #f59e0b;
@@ -39,8 +39,8 @@ body {
     bottom: 0;
     z-index: -1;
     background: 
-        radial-gradient(circle at 10% 20%, rgba(79, 172, 254, 0.08) 0%, transparent 40%),
-        radial-gradient(circle at 90% 80%, rgba(168, 85, 247, 0.08) 0%, transparent 40%);
+        radial-gradient(circle at 10% 20%, rgba(225, 29, 72, 0.06) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(20, 184, 166, 0.06) 0%, transparent 40%);
 }
 
 .app-container {
@@ -293,9 +293,9 @@ input:checked + .slider:before {
 }
 
 .active-patient-badge {
-    background: rgba(168, 85, 247, 0.15);
-    border: 1px solid rgba(168, 85, 247, 0.3);
-    color: #c084fc;
+    background: rgba(20, 184, 166, 0.15);
+    border: 1px solid rgba(20, 184, 166, 0.3);
+    color: #2dd4bf;
     padding: 4px 10px;
     border-radius: 20px;
     font-size: 0.75rem;
