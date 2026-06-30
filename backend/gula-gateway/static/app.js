@@ -241,70 +241,45 @@ btnUploadScan.addEventListener('click', async () => {
     btnUploadScan.classList.add('disabled');
     btnUploadScan.disabled = true;
     
-    addSystemLog(`Simulating DICOM Upload (STOW-RS) for Patient ${currentPatient.name}...`);
+    // Pick between CT (Brain) and XR (Chest) scans
+    const modalities = ["CT", "XR"];
+    const mod = modalities[Math.floor(Math.random() * modalities.length)];
     
-    // Draw a mock imaging slice on canvas to upload as binary "DICOM" file
-    const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 512;
-    const ctx = canvas.getContext('2d');
+    addSystemLog(`Simulating DICOM Generation (Modality: ${mod}) for Patient ${currentPatient.name}...`);
     
-    // Draw a clinical looking scan circle
-    ctx.fillStyle = '#050505';
-    ctx.fillRect(0, 0, 512, 512);
-    
-    const grad = ctx.createRadialGradient(256, 256, 10, 256, 256, 200);
-    grad.addColorStop(0, '#1c1917');
-    grad.addColorStop(0.5, '#44403c');
-    grad.addColorStop(0.8, '#0c0a09');
-    grad.addColorStop(1, '#000000');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(256, 256, 200, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Draw fake anatomy (e.g. Brain slice or Lung contours)
-    ctx.strokeStyle = '#78716c';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(256, 256, 170, 0, Math.PI * 2);
-    ctx.stroke();
-    
-    ctx.fillStyle = '#292524';
-    ctx.beginPath();
-    ctx.ellipse(256, 200, 90, 60, 0, 0, Math.PI * 2);
-    ctx.ellipse(256, 312, 100, 70, 0, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Convert canvas to blob
-    canvas.toBlob(async (blob) => {
+    try {
+        // Step 1: Request a real binary DICOM file from the study generator
+        const dcmUrl = `/dicomweb/generate-test?patientId=${currentPatient.id}&name=${encodeURIComponent(currentPatient.name)}&modality=${mod}`;
+        const dcmRes = await fetch(dcmUrl);
+        if (!dcmRes.ok) throw new Error('DICOM generation failed');
+        const dcmBlob = await dcmRes.blob();
+        
+        addSystemLog(`Generated binary DICOM file (${(dcmBlob.size/1024).toFixed(1)} KB). Pushing to GULA Archive via STOW-RS...`);
+        
+        // Step 2: Post this real binary file to the STOW-RS study receiver
         const formData = new FormData();
-        formData.append('file', blob, 'study_slice.dcm');
+        formData.append('file', dcmBlob, `${currentPatient.id}_study.dcm`);
         formData.append('patientId', currentPatient.id);
         formData.append('tenantId', 'HOSPITAL-ALPHA');
-        
-        // Randomly pick modality
-        const modalities = ["CT", "MR", "XR"];
-        const mod = modalities[Math.floor(Math.random() * modalities.length)];
         formData.append('modality', mod);
+        formData.append('accessionNumber', 'ACC-' + Math.floor(Math.random() * 900000 + 100000));
         
-        try {
-            const res = await fetch('/dicomweb/studies', {
-                method: 'POST',
-                body: formData
-            });
-            
-            if (!res.ok) throw new Error('STOW-RS upload failed');
-            const data = await res.json();
-            
-            addSystemLog(`STOW-RS Success: Uploaded ${mod} Scan. Assigned Study Instance UID: ${data.studyInstanceUid}`);
-        } catch (err) {
-            addSystemLog(`STOW-RS Error: ${err.message}`);
-            btnUploadScan.classList.remove('disabled');
-            btnUploadScan.disabled = false;
-        }
-    }, 'image/jpeg');
+        const uploadRes = await fetch('/dicomweb/studies', {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!uploadRes.ok) throw new Error('STOW-RS upload failed');
+        const data = await uploadRes.json();
+        
+        addSystemLog(`STOW-RS Success: DICOM stored in archive. Study Instance UID: ${data.studyInstanceUid}`);
+    } catch (err) {
+        addSystemLog(`STOW-RS Error: ${err.message}`);
+        btnUploadScan.classList.remove('disabled');
+        btnUploadScan.disabled = false;
+    }
 });
+
 
 // Fetch Timeline
 async function fetchTimeline(patientId) {

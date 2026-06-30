@@ -95,9 +95,10 @@ def main():
     print(f"[Test] Patient created: {patient_data['name']} (ID: {patient_id})")
     
     # 5. Trigger DICOM Upload (gula-study STOW-RS)
-    print("\n[Test] Action 3: Uploading simulated CT scan (STOW-RS)...")
-    dummy_dicom = b"MOCK_DICOM_PIXEL_DATA_AND_HEADERS_12345"
-    files = {"file": ("scan_slice.dcm", dummy_dicom, "application/octet-stream")}
+    print("\n[Test] Action 3: Generating and uploading real binary CT scan (STOW-RS)...")
+    dcm_res = requests.get(f"{GATEWAY_HTTP}/dicomweb/generate-test?patientId={patient_id}&name=Alexander+Fleming&modality=CT")
+    assert dcm_res.status_code == 200, "Failed to generate test DICOM"
+    files = {"file": ("scan_slice.dcm", dcm_res.content, "application/octet-stream")}
     form_data = {
         "patientId": patient_id,
         "tenantId": "HOSPITAL-ALPHA",
