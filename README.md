@@ -4,6 +4,11 @@
 
 GULA is designed not merely as a PACS (Picture Archiving and Communication System), but as the **operating system for clinical imaging**. By centering the platform around an Event Bus and decoupling services, GULA achieves extreme modularity, adaptability, and long-term maintainability. 
 
+### Tribute to the Name: Gula
+The platform is named in tribute to **Gula**, the ancient Mesopotamian/Babylonian goddess of healing, medicine, and doctors. Often depicted as the patron of health, restoration, and clinical well-being, she was the ultimate healer of the ancient world. 
+
+As an event-driven operating system designed to run modern clinical imaging infrastructure, the platform carries her name as a commitment to restoring efficiency, healing technology integration bottlenecks, and supporting clinicians in their daily mission of patient care.
+
 ---
 
 ## 1. Core Philosophy
