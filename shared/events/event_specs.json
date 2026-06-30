@@ -1,0 +1,142 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GULA Event Schema Specifications",
+  "description": "Standardized, FHIR-aligned event specifications for GULA microservices",
+  "definitions": {
+    "EventEnvelope": {
+      "type": "OBJECT",
+      "properties": {
+        "eventId": { "type": "STRING", "format": "uuid" },
+        "eventType": { "type": "STRING" },
+        "timestamp": { "type": "STRING", "format": "date-time" },
+        "source": { "type": "STRING" },
+        "payload": { "type": "OBJECT" }
+      },
+      "required": ["eventId", "eventType", "timestamp", "source", "payload"]
+    },
+    "UserCreatedPayload": {
+      "type": "OBJECT",
+      "properties": {
+        "userId": { "type": "STRING" },
+        "username": { "type": "STRING" },
+        "role": { "type": "STRING", "enum": ["ADMIN", "RADIOLOGIST", "TECHNICIAN"] },
+        "tenantId": { "type": "STRING" }
+      },
+      "required": ["userId", "username", "role", "tenantId"]
+    },
+    "PatientCreatedPayload": {
+      "type": "OBJECT",
+      "properties": {
+        "resourceType": { "type": "STRING", "const": "Patient" },
+        "id": { "type": "STRING" },
+        "name": {
+          "type": "ARRAY",
+          "items": {
+            "type": "OBJECT",
+            "properties": {
+              "given": { "type": "ARRAY", "items": { "type": "STRING" } },
+              "family": { "type": "STRING" }
+            },
+            "required": ["given", "family"]
+          }
+        },
+        "gender": { "type": "STRING", "enum": ["male", "female", "other", "unknown"] },
+        "birthDate": { "type": "STRING", "format": "date" },
+        "tenantId": { "type": "STRING" }
+      },
+      "required": ["resourceType", "id", "name", "gender", "birthDate", "tenantId"]
+    },
+    "StudyReceivedPayload": {
+      "type": "OBJECT",
+      "properties": {
+        "resourceType": { "type": "STRING", "const": "ImagingStudy" },
+        "id": { "type": "STRING" },
+        "status": { "type": "STRING", "const": "registered" },
+        "patientId": { "type": "STRING" },
+        "started": { "type": "STRING", "format": "date-time" },
+        "accessionNumber": { "type": "STRING" },
+        "modality": { "type": "STRING" },
+        "seriesCount": { "type": "INTEGER" },
+        "instanceCount": { "type": "INTEGER" },
+        "tenantId": { "type": "STRING" }
+      },
+      "required": ["resourceType", "id", "status", "patientId", "started", "accessionNumber", "tenantId"]
+    },
+    "StudyStoredPayload": {
+      "type": "OBJECT",
+      "properties": {
+        "resourceType": { "type": "STRING", "const": "ImagingStudy" },
+        "id": { "type": "STRING" },
+        "status": { "type": "STRING", "const": "available" },
+        "patientId": { "type": "STRING" },
+        "storagePath": { "type": "STRING" },
+        "fileSize": { "type": "INTEGER" },
+        "tenantId": { "type": "STRING" }
+      },
+      "required": ["resourceType", "id", "status", "patientId", "storagePath", "tenantId"]
+    },
+    "AIRequestedPayload": {
+      "type": "OBJECT",
+      "properties": {
+        "studyId": { "type": "STRING" },
+        "patientId": { "type": "STRING" },
+        "requestedPlugins": { "type": "ARRAY", "items": { "type": "STRING" } },
+        "tenantId": { "type": "STRING" }
+      },
+      "required": ["studyId", "patientId", "requestedPlugins", "tenantId"]
+    },
+    "AICompletedPayload": {
+      "type": "OBJECT",
+      "properties": {
+        "studyId": { "type": "STRING" },
+        "patientId": { "type": "STRING" },
+        "pluginName": { "type": "STRING" },
+        "status": { "type": "STRING", "enum": ["success", "failed"] },
+        "findings": {
+          "type": "ARRAY",
+          "items": {
+            "type": "OBJECT",
+            "properties": {
+              "resourceType": { "type": "STRING", "const": "Observation" },
+              "code": { "type": "STRING" },
+              "value": { "type": "STRING" },
+              "probability": { "type": "NUMBER" }
+            },
+            "required": ["resourceType", "code", "value", "probability"]
+          }
+        },
+        "tenantId": { "type": "STRING" }
+      },
+      "required": ["studyId", "patientId", "pluginName", "status", "findings", "tenantId"]
+    },
+    "ReportCreatedPayload": {
+      "type": "OBJECT",
+      "properties": {
+        "resourceType": { "type": "STRING", "const": "DiagnosticReport" },
+        "id": { "type": "STRING" },
+        "studyId": { "type": "STRING" },
+        "patientId": { "type": "STRING" },
+        "status": { "type": "STRING", "const": "preliminary" },
+        "author": { "type": "STRING" },
+        "conclusion": { "type": "STRING" },
+        "tenantId": { "type": "STRING" }
+      },
+      "required": ["resourceType", "id", "studyId", "patientId", "status", "author", "conclusion", "tenantId"]
+    },
+    "ReportSignedPayload": {
+      "type": "OBJECT",
+      "properties": {
+        "resourceType": { "type": "STRING", "const": "DiagnosticReport" },
+        "id": { "type": "STRING" },
+        "studyId": { "type": "STRING" },
+        "patientId": { "type": "STRING" },
+        "status": { "type": "STRING", "const": "final" },
+        "author": { "type": "STRING" },
+        "conclusion": { "type": "STRING" },
+        "signature": { "type": "STRING" },
+        "tenantId": { "type": "STRING" }
+      },
+      "required": ["resourceType", "id", "studyId", "patientId", "status", "author", "conclusion", "signature", "tenantId"]
+    }
+  }
+}

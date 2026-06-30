@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GULA | Developer Portal & Event Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="app-container">
+        <!-- Header -->
+        <header>
+            <div class="logo">
+                <span class="gula-title">GULA</span>
+                <span class="gula-sub">INTELLIGENT HEALTHCARE INFRASTRUCTURE</span>
+            </div>
+            <div class="connection-status" id="ws-status">
+                <div class="status-indicator offline"></div>
+                <span>Event Bus: Disconnected</span>
+            </div>
+        </header>
+
+        <!-- Main Content Grid -->
+        <main class="grid-container">
+            <!-- Sidebar: System Health & AI Plugins -->
+            <section class="sidebar">
+                <div class="card">
+                    <h3>Service Status</h3>
+                    <ul class="service-list">
+                        <li>
+                            <div class="indicator online" id="status-gateway"></div>
+                            <span>gula-gateway (Python)</span>
+                        </li>
+                        <li>
+                            <div class="indicator offline" id="status-auth"></div>
+                            <span>gula-auth (Node.js)</span>
+                        </li>
+                        <li>
+                            <div class="indicator offline" id="status-study"></div>
+                            <span>gula-study (Go)</span>
+                        </li>
+                        <li>
+                            <div class="indicator offline" id="status-patient"></div>
+                            <span>gula-patient (Python)</span>
+                        </li>
+                        <li>
+                            <div class="indicator offline" id="status-ai"></div>
+                            <span>gula-ai (Python)</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <div class="card">
+                    <h3>AI Plugin Loader</h3>
+                    <p class="card-desc">Enable or disable inference models dynamically.</p>
+                    <div class="plugin-list" id="plugin-container">
+                        <!-- Loaded dynamically -->
+                        <div class="loading-spinner">Loading plugins...</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>Clinical Simulation Engine</h3>
+                    <p class="card-desc">Simulate a real PACS/EHR clinical workflow.</p>
+                    <div class="simulator-actions">
+                        <button class="btn btn-primary" id="btn-create-patient">1. Register Patient</button>
+                        <button class="btn btn-secondary disabled" id="btn-upload-scan" disabled>2. Upload DICOM (STOW-RS)</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Center: Patient Timeline & Study Viewer -->
+            <section class="workspace">
+                <div class="card patient-timeline-card">
+                    <div class="card-header">
+                        <h3>Digital Patient Timeline</h3>
+                        <div class="active-patient-badge" id="active-patient-id">No Patient Selected</div>
+                    </div>
+                    
+                    <div class="timeline-container" id="timeline-container">
+                        <div class="timeline-placeholder">
+                            <p>Register a patient and trigger clinical actions to build the chronological timeline.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card image-viewer-card">
+                    <h3>GULA Viewer (Cornerstone3D Simulation)</h3>
+                    <div class="viewer-viewport" id="viewer-viewport">
+                        <div class="viewer-placeholder">
+                            <span>DICOM Web Viewport</span>
+                            <small>Upload a study to render pixel frames.</small>
+                        </div>
+                        <img src="" id="viewer-image" style="display:none;" alt="DICOM Frame Viewport" />
+                        <div class="viewer-overlay" id="viewer-overlay" style="display:none;">
+                            <div class="overlay-left">
+                                <div id="overlay-patient">Name: </div>
+                                <div id="overlay-study">Study UID: </div>
+                            </div>
+                            <div class="overlay-right">
+                                <div id="overlay-modality">Modality: </div>
+                                <div id="overlay-wl">W/L: 400 / 40</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right: Real-time Event Stream Logs -->
+            <section class="event-stream">
+                <div class="card log-card">
+                    <div class="card-header">
+                        <h3>Event Bus Stream</h3>
+                        <button class="btn-clear" id="btn-clear-logs">Clear</button>
+                    </div>
+                    <div class="log-stream" id="event-logs">
+                        <!-- Dynamic websocket events -->
+                        <div class="log-entry system">
+                            <span class="log-time">[System]</span> Welcome to GULA. Event Bus logs will stream here.
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+</body>
+</html>

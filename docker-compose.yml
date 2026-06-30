@@ -1,0 +1,142 @@
+version: '3.8'
+
+services:
+  # Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: gula-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: gula_default
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./infrastructure/docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Message Broker
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: gula-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache & Websocket Broker
+  redis:
+    image: redis:7-alpine
+    container_name: gula-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Object Storage (S3 Mock)
+  minio:
+    image: minio/minio
+    container_name: gula-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadminpassword
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # API Gateway & Dashboard Server
+  gateway:
+    build:
+      context: ./backend/gula-gateway
+    container_name: gula-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # gula-auth (Node.js)
+  auth-service:
+    build:
+      context: ./backend/gula-auth
+    container_name: gula-auth
+    environment:
+      - PORT=3001
+      - DATABASE_URL=postgresql://postgres:postgrespassword@postgres:5432/gula_auth
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - JWT_SECRET=gulasecretkey123
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # gula-study (Go)
+  study-service:
+    build:
+      context: ./backend/gula-study
+    container_name: gula-study
+    environment:
+      - PORT=3002
+      - DATABASE_URL=postgresql://postgres:postgrespassword@postgres:5432/gula_study
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadminpassword
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # gula-patient (Python)
+  patient-service:
+    build:
+      context: ./backend/gula-patient
+    container_name: gula-patient
+    environment:
+      - PORT=3003
+      - DATABASE_URL=postgresql://postgres:postgrespassword@postgres:5432/gula_patient
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # gula-ai (Python)
+  ai-service:
+    build:
+      context: ./backend/gula-ai
+    container_name: gula-ai
+    environment:
+      - PORT=3004
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
