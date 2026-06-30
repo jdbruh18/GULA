@@ -11,7 +11,8 @@ SERVICES = [
     {"name": "gula-auth", "dir": "backend/gula-auth", "script": "main.py", "port": 3001},
     {"name": "gula-study", "dir": "backend/gula-study", "script": "main.py", "port": 3002},
     {"name": "gula-patient", "dir": "backend/gula-patient", "script": "main.py", "port": 3003},
-    {"name": "gula-ai", "dir": "backend/gula-ai", "script": "main.py", "port": 3004}
+    {"name": "gula-ai", "dir": "backend/gula-ai", "script": "main.py", "port": 3004},
+    {"name": "gula-dimse", "dir": "backend/gula-dimse", "script": "main.py", "port": 11112}
 ]
 
 processes = []

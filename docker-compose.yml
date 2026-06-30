@@ -140,3 +140,17 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+
+  # gula-dimse (Python C-STORE Receiver)
+  dimse-service:
+    build:
+      context: ./backend/gula-dimse
+    container_name: gula-dimse
+    ports:
+      - "11112:11112"
+    environment:
+      - DIMSE_PORT=11112
+      - STUDY_SERVICE_URL=http://study-service:3002/dicomweb/studies
+      - AE_TITLE=GULA_PACS
+    depends_on:
+      - study-service
