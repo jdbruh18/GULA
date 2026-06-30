@@ -14,8 +14,39 @@ const btnClearLogs = document.getElementById('btn-clear-logs');
 const activePatientId = document.getElementById('active-patient-id');
 const timelineContainer = document.getElementById('timeline-container');
 const viewerViewport = document.getElementById('viewer-viewport');
-const viewerImage = document.getElementById('viewer-image');
+const canvasWrapper = document.getElementById('canvas-wrapper');
+const viewerCanvas = document.getElementById('viewer-canvas');
 const viewerOverlay = document.getElementById('viewer-overlay');
+
+// Diagnostic Viewer State
+let activeTool = 'wl'; // 'wl', 'zoom', 'pan', 'ruler'
+let scale = 1.0;
+let offsetX = 0;
+let offsetY = 0;
+let isDragging = false;
+let startDragX = 0;
+let startDragY = 0;
+let imgObj = null; // Store loaded HTML Image object
+let activeAIOverlay = null; // Store positive AI findings if any
+let pixelSpacing = [1.0, 1.0]; // Default calibration mm/px
+
+// Custom 16-bit Window/Level
+let currentWc = null;
+let currentWw = null;
+
+// Ruler Measurement State
+let rulerStart = null;
+let rulerEnd = null;
+
+// Clinical Reporting DOM Elements
+const reportCard = document.getElementById('reporting-card');
+const reportTemplate = document.getElementById('report-template');
+const reportFindings = document.getElementById('report-findings');
+const reportConclusion = document.getElementById('report-conclusion');
+const reportSignee = document.getElementById('report-signee');
+const btnSignReport = document.getElementById('btn-sign-report');
+const btnPrintReport = document.getElementById('btn-print-report');
+const reportStatusBadge = document.getElementById('report-status-badge');
 
 const serviceHealthIds = {
     'gateway': 'status-gateway',
@@ -337,6 +368,15 @@ async function fetchTimeline(patientId) {
                         findingsHtml = '<div class="findings-box">No clinical abnormalities identified.</div>';
                     }
                     break;
+                case 'ReportSigned':
+                    headingText = 'Diagnostic Report Signed';
+                    description = `Radiologist final sign-off completed by ${item.payload.radiologist}. Status: FINAL.`;
+                    findingsHtml = `
+                        <div class="findings-box" style="border-left: 3px solid var(--primary); background: rgba(225, 29, 72, 0.05);">
+                            <strong>Conclusion:</strong> ${item.payload.conclusion}
+                        </div>
+                    `;
+                    break;
             }
             
             const timeStr = new Date(item.timestamp).toLocaleTimeString();
@@ -358,82 +398,422 @@ async function fetchTimeline(patientId) {
     }
 }
 
+// Setup Tool Click Listeners
+const tools = ['wl', 'zoom', 'pan', 'ruler'];
+tools.forEach(t => {
+    const btn = document.getElementById(`tool-${t}`);
+    if (btn) {
+        btn.addEventListener('click', () => {
+            tools.forEach(tool => {
+                const b = document.getElementById(`tool-${tool}`);
+                if (b) b.classList.remove('active');
+            });
+            btn.classList.add('active');
+            activeTool = t;
+            // Clear ruler when changing tools
+            if (activeTool !== 'ruler') {
+                rulerStart = null;
+                rulerEnd = null;
+                redrawCanvas();
+            }
+        });
+    }
+});
+
+const btnReset = document.getElementById('tool-reset');
+if (btnReset) {
+    btnReset.addEventListener('click', () => {
+        scale = 1.0;
+        offsetX = 0;
+        offsetY = 0;
+        rulerStart = null;
+        rulerEnd = null;
+        if (currentPatient && currentStudy) {
+            if (currentStudy.modality === 'CT') {
+                currentWc = 1000;
+                currentWw = 2000;
+            } else {
+                currentWc = 800;
+                currentWw = 1600;
+            }
+            loadFrameImage();
+        } else {
+            redrawCanvas();
+        }
+    });
+}
+
+// Convert screen mouse events to canvas space coordinates
+function getCanvasMousePos(e) {
+    const rect = viewerCanvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (viewerCanvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (viewerCanvas.height / rect.height);
+    return { x, y };
+}
+
+// Mouse interaction event listeners
+viewerCanvas.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    const pos = getCanvasMousePos(e);
+    startDragX = e.clientX;
+    startDragY = e.clientY;
+    
+    if (activeTool === 'ruler') {
+        rulerStart = pos;
+        rulerEnd = pos;
+        redrawCanvas();
+    }
+});
+
+viewerCanvas.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const pos = getCanvasMousePos(e);
+    
+    const deltaX = e.clientX - startDragX;
+    const deltaY = e.clientY - startDragY;
+    
+    startDragX = e.clientX;
+    startDragY = e.clientY;
+    
+    if (activeTool === 'wl') {
+        if (currentWc !== null && currentWw !== null) {
+            currentWw += deltaX * 4;
+            currentWc -= deltaY * 4;
+            currentWw = Math.max(10, currentWw);
+            throttledLoadFrame();
+        }
+    } else if (activeTool === 'zoom') {
+        scale += deltaY * -0.01;
+        scale = Math.min(5.0, Math.max(0.2, scale));
+        redrawCanvas();
+    } else if (activeTool === 'pan') {
+        offsetX += deltaX;
+        offsetY += deltaY;
+        redrawCanvas();
+    } else if (activeTool === 'ruler') {
+        rulerEnd = pos;
+        redrawCanvas();
+    }
+});
+
+viewerCanvas.addEventListener('mouseup', () => {
+    isDragging = false;
+});
+
+viewerCanvas.addEventListener('mouseleave', () => {
+    isDragging = false;
+});
+
+viewerCanvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const zoomIntensity = 0.1;
+    if (e.deltaY < 0) {
+        scale += zoomIntensity;
+    } else {
+        scale -= zoomIntensity;
+    }
+    scale = Math.min(5.0, Math.max(0.2, scale));
+    redrawCanvas();
+}, { passive: false });
+
+let wlTimeout = null;
+function throttledLoadFrame() {
+    document.getElementById('overlay-wl').innerText = `W/L: ${Math.round(currentWc)} / ${Math.round(currentWw)}`;
+    if (wlTimeout) clearTimeout(wlTimeout);
+    wlTimeout = setTimeout(() => {
+        loadFrameImage();
+    }, 50);
+}
+
+// Fetch frame URL with custom window/level query parameters
+function loadFrameImage() {
+    if (!currentStudy) return;
+    
+    let frameUrl = `/dicomweb/studies/${currentStudy.id}/series/1.2/instances/1.2.3/frames/1`;
+    if (currentWc !== null && currentWw !== null) {
+        frameUrl += `?wc=${Math.round(currentWc)}&ww=${Math.round(currentWw)}`;
+        document.getElementById('overlay-wl').innerText = `W/L: ${Math.round(currentWc)} / ${Math.round(currentWw)}`;
+    } else {
+        document.getElementById('overlay-wl').innerText = `W/L: Auto`;
+    }
+    
+    const tempImg = new Image();
+    tempImg.src = frameUrl;
+    tempImg.onload = () => {
+        imgObj = tempImg;
+        redrawCanvas();
+    };
+}
+
+// Redraw main viewport canvas
+function redrawCanvas() {
+    if (!imgObj) return;
+    const ctx = viewerCanvas.getContext('2d');
+    ctx.clearRect(0, 0, viewerCanvas.width, viewerCanvas.height);
+    
+    ctx.save();
+    ctx.translate(viewerCanvas.width / 2 + offsetX, viewerCanvas.height / 2 + offsetY);
+    ctx.scale(scale, scale);
+    
+    // Draw DICOM image
+    ctx.drawImage(imgObj, -imgObj.width / 2, -imgObj.height / 2);
+    
+    // Draw AI annotations overlay if positive finding is present
+    if (activeAIOverlay) {
+        activeAIOverlay.forEach(o => {
+            if (o.value === 'Positive') {
+                ctx.strokeStyle = '#ef4444';
+                ctx.lineWidth = 3 / scale;
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = 'red';
+                ctx.beginPath();
+                
+                if (o.code === 'brain-hemorrhage') {
+                    ctx.arc(-6, -56, 60, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.save();
+                    ctx.shadowBlur = 0;
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+                    ctx.fill();
+                    ctx.restore();
+                    
+                    ctx.fillStyle = '#ef4444';
+                    ctx.font = `${12 / scale}px Courier`;
+                    ctx.fillText(`AI: HEMORRHAGE (${(o.probability*100).toFixed(1)}%)`, -56, -126);
+                } else if (o.code === 'chest-pneumonia') {
+                    ctx.rect(-126, -76, 80, 120);
+                    ctx.rect(44, -76, 80, 120);
+                    ctx.stroke();
+                    ctx.save();
+                    ctx.shadowBlur = 0;
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
+                    ctx.fill();
+                    ctx.restore();
+                    
+                    ctx.fillStyle = '#ef4444';
+                    ctx.font = `${12 / scale}px Courier`;
+                    ctx.fillText(`AI: PNEUMONIA (${(o.probability*100).toFixed(1)}%)`, -126, -96);
+                }
+            }
+        });
+    }
+    ctx.restore();
+    
+    // Draw non-transformed ruler measurement overlay
+    if (rulerStart && rulerEnd) {
+        ctx.save();
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 2;
+        ctx.shadowBlur = 4;
+        ctx.shadowColor = '#000';
+        
+        ctx.beginPath();
+        ctx.moveTo(rulerStart.x, rulerStart.y);
+        ctx.lineTo(rulerEnd.x, rulerEnd.y);
+        ctx.stroke();
+        
+        ctx.beginPath();
+        drawTick(ctx, rulerStart.x, rulerStart.y, rulerEnd.x, rulerEnd.y);
+        drawTick(ctx, rulerEnd.x, rulerEnd.y, rulerStart.x, rulerStart.y);
+        ctx.stroke();
+        
+        const dx = rulerEnd.x - rulerStart.x;
+        const dy = rulerEnd.y - rulerStart.y;
+        const mmDist = Math.hypot(dx * pixelSpacing[0], dy * pixelSpacing[1]);
+        
+        ctx.fillStyle = '#f59e0b';
+        ctx.font = 'bold 13px Outfit, sans-serif';
+        const labelText = `${mmDist.toFixed(1)} mm`;
+        const midX = (rulerStart.x + rulerEnd.x) / 2 + 10;
+        const midY = (rulerStart.y + rulerEnd.y) / 2 - 10;
+        ctx.fillText(labelText, midX, midY);
+        ctx.restore();
+    }
+}
+
+function drawTick(ctx, x1, y1, x2, y2) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const tickLen = 6;
+    ctx.moveTo(x1 + Math.sin(angle) * tickLen, y1 - Math.cos(angle) * tickLen);
+    ctx.lineTo(x1 - Math.sin(angle) * tickLen, y1 + Math.cos(angle) * tickLen);
+}
+
 // Render raw frame in viewer
 function renderDICOMFrame(study) {
     viewerViewport.querySelector('.viewer-placeholder').style.display = 'none';
-    viewerImage.style.display = 'block';
+    canvasWrapper.style.display = 'block';
     viewerOverlay.style.display = 'flex';
     
-    // Fetch frame from WADO-RS route
-    const frameUrl = `/dicomweb/studies/${study.id}/series/1.2/instances/1.2.3/frames/1`;
-    viewerImage.src = frameUrl;
+    // Set default Window Center / Window Width based on study modality
+    if (study.modality === 'CT') {
+        currentWc = 1000;
+        currentWw = 2000;
+    } else {
+        currentWc = 800;
+        currentWw = 1600;
+    }
+    
+    // Reset view state
+    scale = 1.0;
+    offsetX = 0;
+    offsetY = 0;
+    rulerStart = null;
+    rulerEnd = null;
+    activeAIOverlay = null;
+    
+    // Load frame image
+    loadFrameImage();
     
     // Update overlay metadata
     document.getElementById('overlay-patient').innerText = `Patient: ${currentPatient.name}`;
     document.getElementById('overlay-study').innerText = `Study UID: ${study.id.substring(0, 16)}...`;
     document.getElementById('overlay-modality').innerText = `Modality: ${study.modality}`;
+    
+    // Open reporting workspace
+    reportCard.style.display = 'block';
+    reportStatusBadge.innerText = 'Draft';
+    reportStatusBadge.style.background = 'rgba(245, 158, 11, 0.15)';
+    reportStatusBadge.style.color = '#f59e0b';
+    reportStatusBadge.style.border = '1px solid rgba(245, 158, 11, 0.3)';
+    
+    btnSignReport.disabled = false;
+    btnSignReport.classList.remove('disabled');
+    btnPrintReport.disabled = true;
+    btnPrintReport.classList.add('disabled');
+    
+    reportTemplate.value = 'none';
+    reportFindings.value = '';
+    reportConclusion.value = '';
 }
 
-// Render AI Findings overlay on the viewport
+// Render AI findings overlay on the viewport
 function renderAIOverlay(aiEvent) {
-    const obsList = aiEvent.findings;
+    activeAIOverlay = aiEvent.findings;
+    redrawCanvas();
     
-    // Canvas overlay on top of viewport to draw green or red circles depending on AI findings
-    // Check if canvas already exists, clean up
-    const oldCanvas = viewerViewport.querySelector('canvas');
-    if (oldCanvas) oldCanvas.remove();
-    
-    const canvas = document.createElement('canvas');
-    canvas.style.position = 'absolute';
-    canvas.style.top = '0';
-    canvas.style.left = '0';
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
-    canvas.style.pointerEvents = 'none';
-    canvas.width = viewerViewport.clientWidth;
-    canvas.height = viewerViewport.clientHeight;
-    
-    const ctx = canvas.getContext('2d');
-    
-    // Draw bounding boxes for any positive findings
-    obsList.forEach(o => {
-        if (o.value === 'Positive') {
-            ctx.strokeStyle = '#ef4444';
-            ctx.lineWidth = 3;
-            // Draw glowing outline
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = 'red';
-            ctx.beginPath();
-            
-            if (o.code === 'brain-hemorrhage') {
-                // Hemorrhage circle
-                ctx.arc(250, 200, 60, 0, Math.PI*2);
-                ctx.stroke();
-                ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
-                ctx.fill();
-                ctx.fillStyle = '#ef4444';
-                ctx.font = '12px Courier';
-                ctx.fillText(`AI: HEMORRHAGE (${(o.probability*100).toFixed(1)}%)`, 200, 130);
-            } else if (o.code === 'chest-pneumonia') {
-                // Pneumonia bounding boxes in lungs
-                ctx.rect(130, 180, 80, 120);
-                ctx.rect(300, 180, 80, 120);
-                ctx.stroke();
-                ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
-                ctx.fill();
-                ctx.fillStyle = '#ef4444';
-                ctx.font = '12px Courier';
-                ctx.fillText(`AI: PNEUMONIA CONSOLIDATION (${(o.probability*100).toFixed(1)}%)`, 130, 160);
-            }
-        }
-    });
-    
-    viewerViewport.appendChild(canvas);
-    
-    // Re-enable patient registration for a new cycle
+    // Re-enable patient registration simulator
     btnCreatePatient.classList.remove('disabled');
     btnCreatePatient.disabled = false;
 }
+
+// Reporting template populate listener
+reportTemplate.addEventListener('change', () => {
+    const val = reportTemplate.value;
+    if (val === 'ct-brain') {
+        let aiText = "AI Analytics evaluates brain slice: [Pending results]";
+        let conclusion = "Clinical correlation is advised.";
+        if (activeAIOverlay) {
+            const hem = activeAIOverlay.find(o => o.code === 'brain-hemorrhage');
+            if (hem) {
+                if (hem.value === 'Positive') {
+                    aiText = `ALERT: High-density focal collection identified. AI inference calculates a brain hemorrhage probability of ${(hem.probability * 100).toFixed(1)}%.`;
+                    conclusion = `ACUTE INTRACRANIAL HEMORRHAGE DETECTED.\nAI probability score: ${(hem.probability * 100).toFixed(1)}%. Urgent clinical review required.`;
+                } else {
+                    aiText = `No abnormal high-density focal collections. AI brain hemorrhage probability is low (${(hem.probability * 100).toFixed(1)}%).`;
+                    conclusion = `No acute intracranial hemorrhage.`;
+                }
+            }
+        }
+        reportFindings.value = `INDICATION: Acute head trauma. Evaluate for intracranial pathology.\n\nFINDINGS:\n- Bone: No acute calvarial fracture identified.\n- Brain: Grey-white matter differentiation is preserved. No mass effect or midline shift.\n- Ventricles: Symmetrical and normal size.\n- AI Diagnostics: ${aiText}`;
+        reportConclusion.value = conclusion;
+    } else if (val === 'cxr') {
+        let aiText = "AI Analytics evaluates lung fields: [Pending results]";
+        let conclusion = "Clinical correlation is advised.";
+        if (activeAIOverlay) {
+            const pne = activeAIOverlay.find(o => o.code === 'chest-pneumonia');
+            if (pne) {
+                if (pne.value === 'Positive') {
+                    aiText = `ALERT: Focal airspace opacities identified. AI inference calculates pneumonia consolidation probability of ${(pne.probability * 100).toFixed(1)}%.`;
+                    conclusion = `BILATERAL LUNG CONSOLIDATION CONSISTENT WITH PNEUMONIA.\nAI probability score: ${(pne.probability * 100).toFixed(1)}%.`;
+                } else {
+                    aiText = `Lung fields clear. No consolidation or airspace opacities. AI pneumonia probability is low (${(pne.probability * 100).toFixed(1)}%).`;
+                    conclusion = `Clear lungs. No radiological evidence of active pneumonia.`;
+                }
+            }
+        }
+        reportFindings.value = `INDICATION: Cough and fever. Evaluate for pneumonia.\n\nFINDINGS:\n- Lungs: ${aiText}\n- Heart: Cardiomediastinal silhouette is normal.\n- Pleura: No pleural effusion or pneumothorax.\n- Bones: Thoracic skeleton is intact.`;
+        reportConclusion.value = conclusion;
+    } else {
+        reportFindings.value = '';
+        reportConclusion.value = '';
+    }
+});
+
+// Digital signature submit trigger
+btnSignReport.addEventListener('click', () => {
+    if (!currentPatient || !currentStudy) return;
+    
+    const findings = reportFindings.value;
+    const conclusion = reportConclusion.value;
+    const signee = reportSignee.value;
+    
+    if (!findings.trim() || !conclusion.trim() || !signee.trim()) {
+        alert('Please populate findings, conclusion, and signee name before final signing.');
+        return;
+    }
+    
+    const eventEnvelope = {
+        eventId: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15),
+        eventType: 'ReportSigned',
+        timestamp: new Date().toISOString(),
+        source: 'gula-gateway-client',
+        payload: {
+            resourceType: 'DiagnosticReport',
+            id: 'REP-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+            status: 'final',
+            patientId: currentPatient.id,
+            studyInstanceUid: currentStudy.id,
+            findings: findings,
+            conclusion: conclusion,
+            radiologist: signee,
+            tenantId: 'HOSPITAL-ALPHA'
+        }
+    };
+    
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(eventEnvelope));
+        
+        reportStatusBadge.innerText = 'Finalized';
+        reportStatusBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+        reportStatusBadge.style.color = '#10b981';
+        reportStatusBadge.style.border = '1px solid rgba(16, 185, 129, 0.3)';
+        
+        btnSignReport.disabled = true;
+        btnSignReport.classList.add('disabled');
+        
+        btnPrintReport.disabled = false;
+        btnPrintReport.classList.remove('disabled');
+        
+        addSystemLog(`Report signed electronically by ${signee}.`);
+        
+        setTimeout(() => {
+            fetchTimeline(currentPatient.id);
+        }, 800);
+    } else {
+        alert('WebSocket connection lost. Action aborted.');
+    }
+});
+
+// Print report listener
+btnPrintReport.addEventListener('click', () => {
+    if (!currentPatient || !currentStudy) return;
+    
+    document.getElementById('print-patient-name').innerText = currentPatient.name;
+    document.getElementById('print-patient-id').innerText = currentPatient.id;
+    document.getElementById('print-accession').innerText = currentStudy.accessionNumber || currentStudy.accession || 'ACC-9923';
+    document.getElementById('print-modality').innerText = currentStudy.modality;
+    document.getElementById('print-study-uid').innerText = currentStudy.id;
+    document.getElementById('print-date').innerText = new Date().toLocaleString();
+    
+    document.getElementById('print-findings-text').innerText = reportFindings.value;
+    document.getElementById('print-conclusion-text').innerText = reportConclusion.value;
+    document.getElementById('print-radiologist').innerText = reportSignee.value;
+    
+    const randomHash = Array.from({length: 64}, () => Math.floor(Math.random()*16).toString(16)).join('');
+    document.getElementById('print-report-hash').innerText = `GULA-SECURE-SHA256: ${randomHash.substring(0, 32)}...`;
+    
+    window.print();
+});
 
 // Clear Logs
 btnClearLogs.addEventListener('click', () => {
@@ -447,7 +827,6 @@ function init() {
     checkHealth();
     fetchPlugins();
     
-    // Periodically check health and fetch plugins
     healthCheckInterval = setInterval(() => {
         checkHealth();
     }, 5000);

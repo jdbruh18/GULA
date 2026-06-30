@@ -228,7 +228,7 @@ async def store_dicom(
 
 # WADO-RS: Decodes DICOM pixel matrix and converts to browser PNG on-the-fly
 @app.get("/dicomweb/studies/{studyUID}/series/{seriesUID}/instances/{instanceUID}/frames/{frameNumber}")
-def get_frame(studyUID: str, seriesUID: str, instanceUID: str, frameNumber: int):
+def get_frame(studyUID: str, seriesUID: str, instanceUID: str, frameNumber: int, wc: float = None, ww: float = None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT storage_path FROM studies WHERE study_instance_uid = ?", (studyUID,))
@@ -245,13 +245,19 @@ def get_frame(studyUID: str, seriesUID: str, instanceUID: str, frameNumber: int)
         # Get raw pixel array
         pixels = ds.pixel_array.astype(float)
         
-        # Normalize voxel values to 0-255 grayscale
-        p_min = pixels.min()
-        p_max = pixels.max()
-        if p_max > p_min:
-            normalized = (pixels - p_min) * 255.0 / (p_max - p_min)
+        # Apply custom windowing parameters if provided
+        if wc is not None and ww is not None:
+            lowest_visible = wc - ww / 2.0
+            normalized = (pixels - lowest_visible) * 255.0 / ww
+            normalized = np.clip(normalized, 0, 255)
         else:
-            normalized = pixels * 0
+            # Fallback to full dynamic range normalization
+            p_min = pixels.min()
+            p_max = pixels.max()
+            if p_max > p_min:
+                normalized = (pixels - p_min) * 255.0 / (p_max - p_min)
+            else:
+                normalized = pixels * 0
             
         img_data = normalized.astype(np.uint8)
         
