@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import uuid
 import json
 import time
@@ -10,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import websockets
+import pika
 
 app = FastAPI(title="GULA Patient Service")
 
@@ -21,133 +21,228 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = "patient.db"
+DB_URL = os.getenv("DATABASE_URL")
+RABBITMQ_URL = os.getenv("RABBITMQ_URL")
 GATEWAY_WS_URL = "ws://127.0.0.1:8000/ws/events"
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS patients (
-            id TEXT PRIMARY KEY,
-            first_name TEXT NOT NULL,
-            last_name TEXT NOT NULL,
-            gender TEXT NOT NULL,
-            birth_date TEXT NOT NULL,
-            tenant_id TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS patient_timeline_events (
-            id TEXT PRIMARY KEY,
-            patient_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            source TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-    """)
-    conn.commit()
-    conn.close()
-    print("gula-patient: SQLite patient & timeline tables verified.")
+# Database Connection Wrapper
+def get_connection():
+    if DB_URL:
+        import psycopg2
+        return psycopg2.connect(DB_URL)
+    else:
+        import sqlite3
+        return sqlite3.connect("patient.db")
 
-# Pydantic Schema
+def translate_query(query: str) -> str:
+    if DB_URL:
+        # SQLite uses '?', Postgres uses '%s'
+        return query.replace("?", "%s")
+    return query
+
+def execute_write(query: str, params=()):
+    q = translate_query(query)
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(q, params)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+def execute_read_all(query: str, params=()):
+    q = translate_query(query)
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(q, params)
+        return cursor.fetchall()
+    finally:
+        conn.close()
+
+def execute_read_one(query: str, params=()):
+    q = translate_query(query)
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(q, params)
+        return cursor.fetchone()
+    finally:
+        conn.close()
+
+def init_db():
+    # Verify/create tables
+    execute_write("""
+        CREATE TABLE IF NOT EXISTS patients (
+            id VARCHAR(255) PRIMARY KEY,
+            first_name VARCHAR(255) NOT NULL,
+            last_name VARCHAR(255) NOT NULL,
+            gender VARCHAR(50) NOT NULL,
+            birth_date VARCHAR(50) NOT NULL,
+            tenant_id VARCHAR(100) NOT NULL,
+            created_at VARCHAR(100) NOT NULL
+        );
+    """)
+    execute_write("""
+        CREATE TABLE IF NOT EXISTS patient_timeline_events (
+            id VARCHAR(255) PRIMARY KEY,
+            patient_id VARCHAR(255) NOT NULL,
+            event_type VARCHAR(255) NOT NULL,
+            source VARCHAR(255) NOT NULL,
+            timestamp VARCHAR(100) NOT NULL,
+            payload TEXT NOT NULL,
+            created_at VARCHAR(100) NOT NULL
+        );
+    """)
+    print("gula-patient: Database connection and tables verified.")
+
 class PatientCreateSchema(BaseModel):
     first_name: str
     last_name: str
     gender: str
-    birth_date: str # YYYY-MM-DD
+    birth_date: str
     tenant_id: str
 
-# Helper to publish events
-async def publish_ws_event(event_type: str, payload: dict):
-    try:
-        async with websockets.connect(GATEWAY_WS_URL) as ws:
-            event_envelope = {
-                "eventId": str(uuid.uuid4()),
-                "eventType": event_type,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "source": "gula-patient",
-                "payload": payload
-            }
-            await ws.send(json.dumps(event_envelope))
-            print(f"gula-patient: Published '{event_type}' event to Event Bus.")
-    except Exception as e:
-        print(f"gula-patient: Event publish failed: {e}")
-
-# Handle incoming event messages from Event Bus
-def handle_incoming_event(msg_str: str):
-    try:
-        event = json.loads(msg_str)
-        event_id = event.get("eventId")
-        event_type = event.get("eventType")
-        source = event.get("source")
-        timestamp = event.get("timestamp")
-        payload = event.get("payload", {})
-        
-        # Extract Patient ID
-        patient_id = None
-        if event_type == "PatientCreated":
-            patient_id = payload.get("id")
-        elif event_type in ["StudyReceived", "StudyStored", "AIRequested", "AICompleted", "ReportCreated", "ReportSigned"]:
-            patient_id = payload.get("patientId")
-            
-        if not patient_id:
-            return
-            
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        created_at = datetime.utcnow().isoformat()
-        
+# Dynamic event publisher (RabbitMQ or WS)
+async def publish_event(event_type: str, payload: dict):
+    event_envelope = {
+        "eventId": str(uuid.uuid4()),
+        "eventType": event_type,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "source": "gula-patient",
+        "payload": payload
+    }
+    
+    if RABBITMQ_URL:
+        # Publish to RabbitMQ
         try:
-            # 1. Save event to patient timeline
-            cursor.execute(
-                "INSERT OR REPLACE INTO patient_timeline_events (id, patient_id, event_type, source, timestamp, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (event_id, patient_id, event_type, source, timestamp, json.dumps(payload), created_at)
+            params = pika.URLParameters(RABBITMQ_URL)
+            connection = pika.BlockingConnection(params)
+            channel = connection.channel()
+            channel.exchange_declare(exchange='gula.events', exchange_type='topic', durable=True)
+            routing_key = f"gula.event.{event_type}"
+            channel.basic_publish(
+                exchange='gula.events',
+                routing_key=routing_key,
+                body=json.dumps(event_envelope),
+                properties=pika.BasicProperties(delivery_mode=2)
             )
-            
-            # 2. Sync patient demographics locally if received PatientCreated from another service
-            if event_type == "PatientCreated":
-                first = payload.get("name", [{}])[0].get("given", [""])[0]
-                last = payload.get("name", [{}])[0].get("family", "")
-                cursor.execute(
-                    "INSERT OR REPLACE INTO patients (id, first_name, last_name, gender, birth_date, tenant_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (patient_id, first, last, payload.get("gender"), payload.get("birthDate"), payload.get("tenantId"), created_at)
-                )
-            conn.commit()
-            print(f"gula-patient: Recorded event '{event_type}' for patient '{patient_id}' in timeline database.")
-        except Exception as db_err:
-            conn.rollback()
-            print(f"gula-patient: Database error processing event {event_type}: {db_err}")
-        finally:
-            conn.close()
-            
-    except Exception as err:
-        print(f"gula-patient: Error parsing consumed message: {err}")
+            connection.close()
+            print(f"gula-patient: Published '{event_type}' event to RabbitMQ.")
+        except Exception as e:
+            print(f"gula-patient: RabbitMQ publish failed: {e}")
+    else:
+        # Fallback to WebSocket Event Bus
+        try:
+            async with websockets.connect(GATEWAY_WS_URL) as ws:
+                await ws.send(json.dumps(event_envelope))
+                print(f"gula-patient: Published '{event_type}' event to WebSocket Event Bus.")
+        except Exception as e:
+            print(f"gula-patient: WebSocket publish failed: {e}")
 
-# WS Event Listener Thread
-def ws_listener_thread():
-    async def listen():
+# Core processing logic for timeline events
+def process_timeline_event(event_id, event_type, source, timestamp, payload):
+    patient_id = None
+    if event_type == "PatientCreated":
+        patient_id = payload.get("id")
+    elif event_type in ["StudyReceived", "StudyStored", "AIRequested", "AICompleted", "ReportCreated", "ReportSigned"]:
+        patient_id = payload.get("patientId")
+        
+    if not patient_id:
+        return
+        
+    created_at = datetime.utcnow().isoformat()
+    
+    try:
+        # 1. Save event to patient timeline
+        execute_write(
+            "INSERT OR REPLACE INTO patient_timeline_events (id, patient_id, event_type, source, timestamp, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)" if not DB_URL else
+            "INSERT INTO patient_timeline_events (id, patient_id, event_type, source, timestamp, payload, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload",
+            (event_id, patient_id, event_type, source, timestamp, json.dumps(payload), created_at)
+        )
+        
+        # 2. Sync patient details if received from external systems
+        if event_type == "PatientCreated":
+            first = payload.get("name", [{}])[0].get("given", [""])[0]
+            last = payload.get("name", [{}])[0].get("family", "")
+            execute_write(
+                "INSERT OR REPLACE INTO patients (id, first_name, last_name, gender, birth_date, tenant_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)" if not DB_URL else
+                "INSERT INTO patients (id, first_name, last_name, gender, birth_date, tenant_id, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                (patient_id, first, last, payload.get("gender"), payload.get("birthDate"), payload.get("tenantId"), created_at)
+            )
+        print(f"gula-patient: Recorded event '{event_type}' for patient '{patient_id}' in timeline.")
+    except Exception as db_err:
+        print(f"gula-patient: Database error processing event {event_type}: {db_err}")
+
+# Event bus consumer loop
+def consumer_listener_thread():
+    if RABBITMQ_URL:
+        # 1. RabbitMQ Consumer
+        print(f"gula-patient: Production mode active. Connecting to RabbitMQ consumer at {RABBITMQ_URL}")
         while True:
             try:
-                async with websockets.connect(GATEWAY_WS_URL) as ws:
-                    print("gula-patient: Connected to Event Bus WebSocket. Active consumer.")
-                    while True:
-                        msg = await ws.recv()
-                        handle_incoming_event(msg)
-            except Exception as e:
-                print(f"gula-patient: Event Bus link lost ({e}). Reconnecting in 3s...")
-                await asyncio.sleep(3)
+                params = pika.URLParameters(RABBITMQ_URL)
+                connection = pika.BlockingConnection(params)
+                channel = connection.channel()
+                channel.exchange_declare(exchange='gula.events', exchange_type='topic', durable=True)
                 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(listen())
+                # Bind queue to exchange
+                queue_name = 'gula.patient.timeline'
+                channel.queue_declare(queue=queue_name, durable=True)
+                channel.queue_bind(exchange='gula.events', queue=queue_name, routing_key='gula.event.#')
+                
+                def callback(ch, method, properties, body):
+                    try:
+                        event = json.loads(body.decode('utf-8'))
+                        process_timeline_event(
+                            event.get("eventId"),
+                            event.get("eventType"),
+                            event.get("source"),
+                            event.get("timestamp"),
+                            event.get("payload", {})
+                        )
+                    except Exception as parse_err:
+                        print(f"gula-patient: Message parsing error: {parse_err}")
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    
+                channel.basic_consume(queue=queue_name, on_message_callback=callback)
+                print("gula-patient: Listening for RabbitMQ events...")
+                channel.start_consuming()
+            except Exception as e:
+                print(f"gula-patient: RabbitMQ consumer connection error: {e}. Retrying in 5s...")
+                time.sleep(5)
+    else:
+        # 2. Local WebSocket Client Consumer
+        async def listen():
+            while True:
+                try:
+                    async with websockets.connect(GATEWAY_WS_URL) as ws:
+                        print("gula-patient: Connected to WebSocket Event Bus. Listening...")
+                        while True:
+                            msg = await ws.recv()
+                            event = json.loads(msg)
+                            process_timeline_event(
+                                event.get("eventId"),
+                                event.get("eventType"),
+                                event.get("source"),
+                                event.get("timestamp"),
+                                event.get("payload", {})
+                            )
+                except Exception as e:
+                    print(f"gula-patient: WS Event Bus link lost ({e}). Reconnecting in 3s...")
+                    await asyncio.sleep(3)
+                    
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(listen())
 
-threading.Thread(target=ws_listener_thread, daemon=True).start()
+init_db()
+threading.Thread(target=consumer_listener_thread, daemon=True).start()
 
-# API Endpoints
+# API Routes
 @app.get("/api/patients/health")
 def health():
     return {"service": "gula-patient", "status": "UP"}
@@ -157,21 +252,15 @@ async def create_patient(data: PatientCreateSchema):
     patient_id = "PT-" + str(uuid.uuid4())[:8].upper()
     created_at = datetime.utcnow().isoformat()
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
     try:
-        cursor.execute(
+        execute_write(
             "INSERT INTO patients (id, first_name, last_name, gender, birth_date, tenant_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (patient_id, data.first_name, data.last_name, data.gender, data.birth_date, data.tenant_id, created_at)
         )
-        conn.commit()
     except Exception as e:
-        conn.close()
         raise HTTPException(status_code=500, detail=f"Database write failed: {str(e)}")
-    finally:
-        conn.close()
         
-    # Publish PatientCreated Event (FHIR formatted)
+    # Publish PatientCreated Event
     fhir_payload = {
         "resourceType": "Patient",
         "id": patient_id,
@@ -183,7 +272,7 @@ async def create_patient(data: PatientCreateSchema):
         "birthDate": data.birth_date,
         "tenantId": data.tenant_id
     }
-    await publish_ws_event("PatientCreated", fhir_payload)
+    await publish_event("PatientCreated", fhir_payload)
     
     return {
         "message": "Patient created successfully",
@@ -193,12 +282,7 @@ async def create_patient(data: PatientCreateSchema):
 
 @app.get("/api/patients")
 def get_patients():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, first_name, last_name, gender, birth_date, tenant_id FROM patients")
-    rows = cursor.fetchall()
-    conn.close()
-    
+    rows = execute_read_all("SELECT id, first_name, last_name, gender, birth_date, tenant_id FROM patients")
     result = []
     for r in rows:
         result.append({
@@ -213,20 +297,11 @@ def get_patients():
 
 @app.get("/api/patients/{patient_id}/timeline")
 def get_patient_timeline(patient_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # Get Patient
-    cursor.execute("SELECT id, first_name, last_name, gender, birth_date, tenant_id FROM patients WHERE id = ?", (patient_id,))
-    p_row = cursor.fetchone()
+    p_row = execute_read_one("SELECT id, first_name, last_name, gender, birth_date, tenant_id FROM patients WHERE id = ?", (patient_id,))
     if not p_row:
-        conn.close()
         raise HTTPException(status_code=404, detail="Patient not found")
         
-    # Get Timeline Events
-    cursor.execute("SELECT id, event_type, source, timestamp, payload FROM patient_timeline_events WHERE patient_id = ? ORDER BY timestamp ASC", (patient_id,))
-    e_rows = cursor.fetchall()
-    conn.close()
+    e_rows = execute_read_all("SELECT id, event_type, source, timestamp, payload FROM patient_timeline_events WHERE patient_id = ? ORDER BY timestamp ASC", (patient_id,))
     
     timeline = []
     for r in e_rows:
@@ -248,8 +323,6 @@ def get_patient_timeline(patient_id: str):
         },
         "timeline": timeline
     }
-
-init_db()
 
 if __name__ == "__main__":
     import uvicorn

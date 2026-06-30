@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import time
+import io
 import threading
 import asyncio
 from datetime import datetime
@@ -9,11 +10,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import websockets
+import pika
 
 import pydicom
 import numpy as np
 from plugins.hemorrhage import HemorrhageDetectionPlugin
 from plugins.pneumonia import PneumoniaDetectionPlugin
+
+# MinIO Client
+from minio import Minio
 
 app = FastAPI(title="GULA AI Inference Engine")
 
@@ -26,9 +31,29 @@ app.add_middleware(
 )
 
 GATEWAY_WS_URL = "ws://127.0.0.1:8000/ws/events"
+RABBITMQ_URL = os.getenv("RABBITMQ_URL")
+
+# MinIO Configuration
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadminpassword")
+MINIO_BUCKET = "gula-dicom"
+
+minio_client = None
+if MINIO_ENDPOINT:
+    try:
+        # MinIO is always unsecure in our docker-compose dev setups
+        minio_client = Minio(
+            MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            secure=False
+        )
+        print(f"gula-ai: Connected to MinIO object storage at {MINIO_ENDPOINT}")
+    except Exception as me:
+        print(f"gula-ai: Failed to initialize MinIO client: {me}")
 
 # AI Plugin Registry
-# Format: { "key": {"instance": plugin, "enabled": bool} }
 registry = {}
 
 def init_plugins():
@@ -39,21 +64,42 @@ def init_plugins():
     registry[p_plugin.name] = {"instance": p_plugin, "enabled": True}
     print(f"gula-ai: Loaded {len(registry)} plugins successfully.")
 
-# Helper to publish events
-async def publish_ws_event(event_type: str, payload: dict):
-    try:
-        async with websockets.connect(GATEWAY_WS_URL) as ws:
-            event_envelope = {
-                "eventId": str(uuid.uuid4()),
-                "eventType": event_type,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "source": "gula-ai",
-                "payload": payload
-            }
-            await ws.send(json.dumps(event_envelope))
-            print(f"gula-ai: Published '{event_type}' event to Event Bus.")
-    except Exception as e:
-        print(f"gula-ai: WebSocket event publish failed: {e}")
+# Helper to publish events dynamically
+async def publish_event(event_type: str, payload: dict):
+    event_envelope = {
+        "eventId": str(uuid.uuid4()),
+        "eventType": event_type,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "source": "gula-ai",
+        "payload": payload
+    }
+    
+    if RABBITMQ_URL:
+        # Publish to RabbitMQ
+        try:
+            params = pika.URLParameters(RABBITMQ_URL)
+            connection = pika.BlockingConnection(params)
+            channel = connection.channel()
+            channel.exchange_declare(exchange='gula.events', exchange_type='topic', durable=True)
+            routing_key = f"gula.event.{event_type}"
+            channel.basic_publish(
+                exchange='gula.events',
+                routing_key=routing_key,
+                body=json.dumps(event_envelope),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            connection.close()
+            print(f"gula-ai: Published '{event_type}' event to RabbitMQ.")
+        except Exception as e:
+            print(f"gula-ai: RabbitMQ publish failed: {e}")
+    else:
+        # Publish to WebSockets Event Bus
+        try:
+            async with websockets.connect(GATEWAY_WS_URL) as ws:
+                await ws.send(json.dumps(event_envelope))
+                print(f"gula-ai: Published '{event_type}' event to WebSocket Event Bus.")
+        except Exception as e:
+            print(f"gula-ai: WebSocket publish failed: {e}")
 
 # Process inference asynchronously (runs quantitative analysis directly on binary voxels)
 async def run_inference_pipeline(payload: dict):
@@ -63,13 +109,13 @@ async def run_inference_pipeline(payload: dict):
     storage_path = payload.get("storagePath")
     tenant_id = payload.get("tenantId")
     
-    print(f"gula-ai: Initiating pixel-level inference for study {study_id} (Patient: {patient_id}, Path: {storage_path})")
+    print(f"gula-ai: Initiating pixel-level inference for study {study_id} (Patient: {patient_id})")
     
     # 1. Identify enabled plugins
     active_plugin_names = [name for name, cfg in registry.items() if cfg["enabled"]]
     
     # 2. Publish AIRequested Event
-    await publish_ws_event("AIRequested", {
+    await publish_event("AIRequested", {
         "studyId": study_id,
         "patientId": patient_id,
         "requestedPlugins": active_plugin_names,
@@ -79,24 +125,38 @@ async def run_inference_pipeline(payload: dict):
     # 3. Simulate processing delay (GPU queue emulation)
     await asyncio.sleep(2)
     
-    # 4. Open binary file and perform pixel-level analysis
+    # 4. Open binary file (from MinIO or Local File System) and analyze
     all_findings = []
     
-    # Heuristic clinical classifier
     try:
-        if storage_path and os.path.exists(storage_path):
-            # Load DICOM dataset
+        ds = None
+        # Mode A: Fetch from MinIO Object Storage
+        if minio_client and storage_path:
+            print(f"gula-ai: Downloading study from MinIO bucket '{MINIO_BUCKET}' at key '{storage_path}'...")
+            try:
+                response = minio_client.get_object(MINIO_BUCKET, storage_path)
+                dcm_bytes = response.read()
+                response.close()
+                response.release_conn()
+                ds = pydicom.dcmread(io.BytesIO(dcm_bytes))
+                print("gula-ai: Successfully parsed DICOM file from MinIO.")
+            except Exception as minio_err:
+                print(f"gula-ai: MinIO retrieval failed: {minio_err}")
+                
+        # Mode B: Fetch from Local Filesystem (Local Sandbox)
+        elif storage_path and os.path.exists(storage_path):
             ds = pydicom.dcmread(storage_path)
+            print("gula-ai: Successfully parsed local DICOM file.")
+            
+        # Execute Pixel Calculations
+        if ds is not None:
             pixels = ds.pixel_array
             
-            # Analyze pixels based on modality and active plugins
             if modality == "CT" and "Brain Hemorrhage Detection" in active_plugin_names:
-                # Hemorrhage appears as a dense bright region in CT (HU 50-100, which we mapped to 850 in generated test scan)
-                # We scan for raw values between 800 and 900
+                # Acute blood shows up bright in CT (HU 50-100, mapped to 850 in generated CT scan)
                 high_density_pixels = np.sum((pixels >= 800) & (pixels <= 900))
                 print(f"gula-ai: CT brain scan high-density pixels count = {high_density_pixels}")
                 
-                # If high-density count is high, we declare a Positive Hemorrhage finding
                 if high_density_pixels > 400:
                     prob = float(min(0.99, 0.70 + (high_density_pixels - 400) / 1500.0))
                     val = "Positive"
@@ -113,8 +173,7 @@ async def run_inference_pipeline(payload: dict):
                 print(f"gula-ai: Brain Hemorrhage result: {val} (Prob: {prob:.4f})")
                 
             elif modality == "XR" and "Chest Pneumonia Detection" in active_plugin_names:
-                # Pneumonia consolidations appear as bright cloud patches in dark lung fields (opacity > 900 inside lung coordinates)
-                # We scan left lung region (row indices 140 to 400, col indices 100 to 240)
+                # Consolidation appears as bright opacity cloud in lungs (density > 900 inside lung box)
                 lung_area = pixels[140:400, 100:240]
                 consolidation_pixels = np.sum(lung_area >= 900)
                 print(f"gula-ai: Chest X-ray consolidation pixels count = {consolidation_pixels}")
@@ -134,8 +193,7 @@ async def run_inference_pipeline(payload: dict):
                 })
                 print(f"gula-ai: Chest Pneumonia result: {val} (Prob: {prob:.4f})")
         else:
-            print(f"gula-ai: Warning - Study local file path {storage_path} not found. Running fallback random models.")
-            # Fallback mock run
+            print("gula-ai: Warning - No DICOM dataset loaded. Running fallback random mock model.")
             for name in active_plugin_names:
                 plugin = registry[name]["instance"]
                 findings = plugin.run(payload)
@@ -143,14 +201,13 @@ async def run_inference_pipeline(payload: dict):
                 
     except Exception as dcm_err:
         print(f"gula-ai: Error during clinical binary parsing: {dcm_err}. Running mock fallback.")
-        # Fallback
         for name in active_plugin_names:
             plugin = registry[name]["instance"]
             findings = plugin.run(payload)
             all_findings.extend(findings)
             
     # 5. Publish AICompleted Event
-    await publish_ws_event("AICompleted", {
+    await publish_event("AICompleted", {
         "studyId": study_id,
         "patientId": patient_id,
         "pluginName": "GULA Inference Pipeline",
@@ -159,7 +216,7 @@ async def run_inference_pipeline(payload: dict):
         "tenantId": tenant_id
     })
 
-# Handle incoming event messages from Event Bus
+# Handle incoming event messages
 def handle_incoming_event(msg_str: str):
     try:
         event = json.loads(msg_str)
@@ -168,30 +225,60 @@ def handle_incoming_event(msg_str: str):
         
         if event_type == "StudyStored":
             asyncio.create_task(run_inference_pipeline(payload))
-            
     except Exception as err:
         print(f"gula-ai: Error parsing consumed message: {err}")
 
-# WS Event Listener Thread
-def ws_listener_thread():
-    async def listen():
+# Event listener thread
+def consumer_listener_thread():
+    if RABBITMQ_URL:
+        # RabbitMQ Mode
+        print(f"gula-ai: Production mode active. Connecting to RabbitMQ consumer at {RABBITMQ_URL}")
         while True:
             try:
-                async with websockets.connect(GATEWAY_WS_URL) as ws:
-                    print("gula-ai: Connected to Event Bus WebSocket. Listening for StudyStored.")
-                    while True:
-                        msg = await ws.recv()
-                        handle_incoming_event(msg)
-            except Exception as e:
-                print(f"gula-ai: Event Bus link lost ({e}). Reconnecting in 3s...")
-                await asyncio.sleep(3)
+                params = pika.URLParameters(RABBITMQ_URL)
+                connection = pika.BlockingConnection(params)
+                channel = connection.channel()
+                channel.exchange_declare(exchange='gula.events', exchange_type='topic', durable=True)
                 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(listen())
+                queue_name = 'gula.ai.studies'
+                channel.queue_declare(queue=queue_name, durable=True)
+                channel.queue_bind(exchange='gula.events', queue=queue_name, routing_key='gula.event.StudyStored')
+                
+                def callback(ch, method, properties, body):
+                    try:
+                        event = json.loads(body.decode('utf-8'))
+                        # Run inference pipeline within async loop
+                        asyncio.run(run_inference_pipeline(event.get("payload", {})))
+                    except Exception as run_err:
+                        print(f"gula-ai: Error running pipeline: {run_err}")
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    
+                channel.basic_consume(queue=queue_name, on_message_callback=callback)
+                print("gula-ai: Listening for StudyStored on RabbitMQ...")
+                channel.start_consuming()
+            except Exception as e:
+                print(f"gula-ai: RabbitMQ consumer connection error: {e}. Retrying in 5s...")
+                time.sleep(5)
+    else:
+        # WebSocket Mode
+        async def listen():
+            while True:
+                try:
+                    async with websockets.connect(GATEWAY_WS_URL) as ws:
+                        print("gula-ai: Connected to Event Bus WebSocket. Listening for StudyStored...")
+                        while True:
+                            msg = await ws.recv()
+                            handle_incoming_event(msg)
+                except Exception as e:
+                    print(f"gula-ai: Event Bus link lost ({e}). Reconnecting in 3s...")
+                    await asyncio.sleep(3)
+                    
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(listen())
 
 init_plugins()
-threading.Thread(target=ws_listener_thread, daemon=True).start()
+threading.Thread(target=consumer_listener_thread, daemon=True).start()
 
 # API Endpoints
 @app.get("/api/ai/health")

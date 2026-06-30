@@ -6,6 +6,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+import pika
+import threading
+import asyncio
+import time
 
 app = FastAPI(title="GULA API Gateway")
 
@@ -44,15 +48,49 @@ class ConnectionManager:
         print(f"gula-gateway: Client disconnected from Event Bus. Active connections: {len(self.active_connections)}")
 
     async def broadcast(self, message: str, sender: WebSocket = None):
-        # Broadcast message to all connected clients
         for connection in self.active_connections:
-            # We broadcast to everyone including sender (so dashboard and services see all events)
             try:
                 await connection.send_text(message)
             except Exception:
                 pass
 
 manager = ConnectionManager()
+
+# Background RabbitMQ-to-WebSocket Event Bridge
+def rabbitmq_bridge_thread(loop):
+    rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+    print(f"gula-gateway: Production mode active. Connecting to RabbitMQ at {rabbitmq_url}")
+    while True:
+        try:
+            params = pika.URLParameters(rabbitmq_url)
+            connection = pika.BlockingConnection(params)
+            channel = connection.channel()
+            channel.exchange_declare(exchange='gula.events', exchange_type='topic', durable=True)
+            
+            # Temporary queue for gateway websocket broadcast
+            result = channel.queue_declare(queue='', exclusive=True)
+            queue_name = result.method.queue
+            channel.queue_bind(exchange='gula.events', queue=queue_name, routing_key='gula.event.#')
+            
+            def callback(ch, method, properties, body):
+                msg = body.decode('utf-8')
+                # Route safely back to the FastAPI main thread loop
+                asyncio.run_coroutine_threadsafe(manager.broadcast(msg), loop)
+                
+            channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
+            print("gula-gateway: Connected to RabbitMQ. Bridging all events to WebSockets.")
+            channel.start_consuming()
+        except Exception as e:
+            print(f"gula-gateway: RabbitMQ connection error in bridge thread: {e}. Reconnecting in 3s...")
+            time.sleep(3)
+
+@app.on_event("startup")
+def startup_event():
+    # If RabbitMQ url is configured, launch the listener bridge thread
+    if os.getenv("RABBITMQ_URL"):
+        loop = asyncio.get_event_loop()
+        t = threading.Thread(target=rabbitmq_bridge_thread, args=(loop,), daemon=True)
+        t.start()
 
 # Dynamic Reverse Proxy Routing
 async def proxy_request(service_url: str, path: str, request: Request) -> Response:
@@ -62,26 +100,28 @@ async def proxy_request(service_url: str, path: str, request: Request) -> Respon
     req_body = await request.body()
     req_headers = dict(request.headers)
     
+    # Clean headers that conflict with forwarding
     req_headers.pop("host", None)
     req_headers.pop("content-length", None)
+    
+    target_url = f"{service_url}/{path}"
     
     async with httpx.AsyncClient() as client:
         try:
             res = await client.request(
-                method=method,
-                url=f"{service_url}/{path}",
-                headers=req_headers,
+                method,
+                target_url,
                 content=req_body,
-                params=dict(request.query_params),
-                timeout=60.0
+                headers=req_headers,
+                params=request.query_params,
+                timeout=30.0
             )
-            content_type = res.headers.get("content-type", "application/json")
             return Response(
                 content=res.content,
                 status_code=res.status_code,
-                headers={"Content-Type": content_type}
+                headers=dict(res.headers)
             )
-        except httpx.RequestError as e:
+        except Exception as e:
             return Response(
                 content=json.dumps({"error": f"Gateway proxy failure to {service_url}: {str(e)}"}),
                 status_code=502,
@@ -111,33 +151,49 @@ async def websocket_events(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Listen for events published by microservices or client UI
             data = await websocket.receive_text()
             try:
-                # Log event routing in gateway stdout
                 event = json.loads(data)
                 print(f"gula-gateway: [Event Bus Routing] Routing event '{event.get('eventType')}' from '{event.get('source')}'")
             except Exception:
                 pass
-            # Broadcast the event payload to all subscribers
+                
+            # Broadcast to all connected websockets
             await manager.broadcast(data, sender=websocket)
+            
+            # If in RabbitMQ mode, publish it to RabbitMQ exchange as well!
+            rabbitmq_url = os.getenv("RABBITMQ_URL")
+            if rabbitmq_url:
+                try:
+                    event = json.loads(data)
+                    event_type = event.get("eventType")
+                    routing_key = f"gula.event.{event_type}"
+                    params = pika.URLParameters(rabbitmq_url)
+                    conn = pika.BlockingConnection(params)
+                    ch = conn.channel()
+                    ch.basic_publish(
+                        exchange='gula.events',
+                        routing_key=routing_key,
+                        body=data
+                    )
+                    conn.close()
+                except Exception as ex:
+                    print(f"gula-gateway: Failed to publish WS event to RabbitMQ: {ex}")
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
 # Serve Dashboard static files
+@app.get("/", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
 def get_dashboard():
     static_html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     with open(static_html_path, "r") as f:
         return HTMLResponse(content=f.read())
 
-# Mount static files (dashboard assets)
+# Mount static files
 static_dir = os.path.join(os.path.dirname(__file__), "static")
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to GULA API Gateway. Navigate to /dashboard for developer portal."}
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 if __name__ == "__main__":
     import uvicorn

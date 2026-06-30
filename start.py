@@ -51,7 +51,7 @@ def check_venv():
         print("[Start] Virtual environment created.")
         
     print("[Start] Installing/Verifying dependencies in venv...")
-    packages = ["fastapi", "uvicorn", "websockets", "httpx", "pyjwt", "bcrypt", "python-multipart", "requests", "pydicom", "numpy", "pillow"]
+    packages = ["fastapi", "uvicorn", "websockets", "httpx", "pyjwt", "bcrypt", "python-multipart", "requests", "pydicom", "numpy", "pillow", "pika", "psycopg2-binary", "minio"]
     subprocess.run([python_path, "-m", "pip", "install", "--upgrade", "pip"], check=True)
     subprocess.run([python_path, "-m", "pip", "install"] + packages, check=True)
     print("[Start] Dependency verification complete.")
